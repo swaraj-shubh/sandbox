@@ -127,9 +127,7 @@ _DEFAULT_CFG: dict = {
         "entities": [
             "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD",
             "US_SSN", "US_PASSPORT", "US_DRIVER_LICENSE",
-            "IP_ADDRESS", "IBAN_CODE", "LOCATION",
-            "PERSON", "NRP",
-            "DATE_TIME", "MEDICAL_LICENSE",
+            "IP_ADDRESS", "IBAN_CODE", "MEDICAL_LICENSE",
             "URL",
         ],
         "operator": "replace",

@@ -242,7 +242,7 @@ except ImportError as e:
 #  GEMINI CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_API_KEY  = "AIzaSyCTMowukYkaZX4THur9qRBtgZ0a5rcDsjo"
+GEMINI_API_KEY  = "AIzaSyBXDHnpZgyqEmg35WEnWe_aOwZATP81Ga4"
 GEMINI_BASE_URL = os.getenv(
     "GEMINI_BASE_URL",
     "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -710,32 +710,169 @@ async def layer_info():
         "layer_status": _reg.summary(),
     }
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  ⑦ HOT RELOAD  — POST /admin/reload
+#  ① B  NATIVE GEMINI PROXY  — POST /v1beta/models/{model_path}
+#  Catches calls from google-genai SDK / langchain-google-genai
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.post("/admin/reload", tags=["Admin"], summary="Hot-reload layer YAML configs")
-async def reload_configs():
-    """
-    Reload YAML configs (patterns, policies, output_policy) in all layers
-    without restarting the server. Edit a YAML file then call this.
+@app.api_route(
+    "/v1beta/{full_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    tags=["Proxy"],
+    summary="Native Gemini SDK catch-all proxy"
+)
+async def proxy_gemini_native(full_path: str, request: Request):
+    # full_path will be: "models/gemini-2.5-flash:generateContent"
+    t0  = time.perf_counter()
+    rid = uuid.uuid4().hex[:12]
 
-    **Quick test:**
-    ```bash
-    curl -X POST http://localhost:8000/admin/reload
-    ```
-    """
-    reloaded, errors = [], []
-    for name, obj in [("L1", layer1), ("L2", layer2), ("L3", layer3)]:
-        if obj and hasattr(obj, "reload_config"):
-            try:
-                obj.reload_config()
-                reloaded.append(name)
-            except Exception as exc:
-                errors.append({"layer": name, "error": str(exc)})
-    return {"reloaded": reloaded, "errors": errors, "timestamp": _ts()}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
 
+    # Extract user text from native Gemini format
+    user_msg = ""
+    for c in reversed(body.get("contents", [])):
+        if c.get("role") == "user":
+            for part in c.get("parts", []):
+                if "text" in part:
+                    user_msg = part["text"]
+                    break
+        if user_msg:
+            break
+
+    session_id    = request.headers.get("X-Session-ID", rid)
+    user_role     = request.headers.get("X-User-Role",  "user")
+    user_identity = request.headers.get("X-User-Identity", "")
+
+    logger.info("▶ [%s] native  /%s  chars=%d", rid, full_path, len(user_msg))
+
+    pipeline: dict[str, Any] = {
+        "request_id": rid, "timestamp": _ts(),
+        "user_message": user_msg[:400], "model": full_path,
+        "session_id": session_id, "user_role": user_role,
+        "blocked": False, "blocked_at": None, "layers": {},
+    }
+
+    current = user_msg
+
+    # ── L1 ──────────────────────────────────────────────────────────────────
+    if layer1:
+        t  = time.perf_counter()
+        l1 = layer1.run(current, request_id=rid)
+        l1["processing_ms"] = round((time.perf_counter() - t) * 1000, 2)
+        pipeline["layers"]["L1_Sanitization"] = l1
+        if l1["blocked"]:
+            logger.warning("✗ [%s] BLOCKED L1 | %s", rid, l1["reason"])
+            _finalise(pipeline, t0, True, "L1_Sanitization")
+            return JSONResponse(
+                {"error": {"code": 400, "message": f"Blocked by VAJRA L1: {l1['reason']}", "status": "INVALID_ARGUMENT"}},
+                status_code=400,
+            )
+        current = l1.get("clean_text", current)
+    else:
+        pipeline["layers"]["L1_Sanitization"] = {"skipped": True}
+
+    # ── L2 ──────────────────────────────────────────────────────────────────
+    if layer2:
+        try:
+            l2 = await layer2.run(current, request_id=rid)
+        except Exception as exc:
+            l2 = {"blocked": False, "error": str(exc)}
+        pipeline["layers"]["L2_Semantic"] = l2
+        if l2.get("blocked"):
+            logger.warning("✗ [%s] BLOCKED L2 | %s", rid, l2.get("reason"))
+            _finalise(pipeline, t0, True, "L2_Semantic")
+            return JSONResponse(
+                {"error": {"code": 400, "message": f"Blocked by VAJRA L2: {l2.get('reason')}", "status": "INVALID_ARGUMENT"}},
+                status_code=400,
+            )
+    else:
+        pipeline["layers"]["L2_Semantic"] = {"skipped": True}
+
+    # ── L3 ──────────────────────────────────────────────────────────────────
+    if layer3:
+        try:
+            l3 = layer3.run_text(
+                text=current, session_id=session_id,
+                user_role=user_role, identity=user_identity, request_id=rid,
+            )
+        except Exception as exc:
+            l3 = {"blocked": False, "error": str(exc), "action": "ALLOW"}
+        pipeline["layers"]["L3_Policy"] = l3
+        if l3.get("blocked"):
+            logger.warning("✗ [%s] BLOCKED L3 | %s", rid, l3.get("reason"))
+            _finalise(pipeline, t0, True, "L3_Policy")
+            return JSONResponse(
+                {"error": {"code": 400, "message": f"Blocked by VAJRA L3: {l3.get('reason')}", "status": "INVALID_ARGUMENT"}},
+                status_code=400,
+            )
+    else:
+        pipeline["layers"]["L3_Policy"] = {"skipped": True}
+
+    # ── Forward to real Gemini ───────────────────────────────────────────────
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/{full_path}"
+    logger.info("→ [%s] forwarding to %s", rid, gemini_url)
+    t_gem = time.perf_counter()
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                gemini_url,
+                headers={
+                    "x-goog-api-key": GEMINI_API_KEY,
+                    "Content-Type":   "application/json",
+                },
+                json=body,
+            )
+        gem = resp.json()
+        pipeline["gemini_ms"] = round((time.perf_counter() - t_gem) * 1000, 2)
+
+        if resp.status_code != 200:
+            logger.error("[%s] Gemini HTTP %d: %s", rid, resp.status_code, gem)
+            _finalise(pipeline, t0, False, None)
+            return JSONResponse(gem, status_code=resp.status_code)
+
+        raw_text = ""
+        try:
+            raw_text = gem["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError):
+            pass
+
+        logger.info("← [%s] Gemini OK  chars=%d  (%.0fms)", rid, len(raw_text), pipeline["gemini_ms"])
+
+    except httpx.TimeoutException:
+        _finalise(pipeline, t0, False, None)
+        return JSONResponse({"error": "Upstream timeout"}, status_code=504)
+    except Exception as exc:
+        logger.error("[%s] Gemini call failed: %s", rid, exc)
+        _finalise(pipeline, t0, False, None)
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    # ── L4 ──────────────────────────────────────────────────────────────────
+    if layer4 and raw_text:
+        l4  = layer4.run(raw_text, request_id=rid)
+        l4d = l4.to_dict()
+        pipeline["layers"]["L4_Output"] = l4d
+        if l4.blocked:
+            logger.warning("✗ [%s] BLOCKED L4", rid)
+            _finalise(pipeline, t0, True, "L4_Output")
+            return JSONResponse(
+                {"error": {"code": 400, "message": "Output blocked by VAJRA L4", "status": "INVALID_ARGUMENT"}},
+                status_code=400,
+            )
+        try:
+            gem["candidates"][0]["content"]["parts"][0]["text"] = l4.filtered_text
+        except (KeyError, IndexError):
+            pass
+    else:
+        pipeline["layers"]["L4_Output"] = {"skipped": True}
+
+    pipeline["response_preview"] = raw_text[:200]
+    _finalise(pipeline, t0, False, None)
+    logger.info("✓ [%s] native DONE  total_ms=%.0f", rid, pipeline["total_ms"])
+    return JSONResponse(gem)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⑧ LIVE DASHBOARD  — GET /

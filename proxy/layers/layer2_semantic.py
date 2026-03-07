@@ -43,7 +43,7 @@ from dotenv import load_dotenv, find_dotenv
 # ── Environment ───────────────────────────────────────────────────────────────
 
 load_dotenv(find_dotenv(usecwd=True))
-GEMINI_API_KEY = "AIzaSyDkaqHprDK-M1fDrDhjzxAKd-et_flo9_Q"
+GEMINI_API_KEY = "AIzaSyCwZpSnRXEZzXUuK18JtgqRHCOfqWe8yKI"
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────

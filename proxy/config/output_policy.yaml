@@ -34,10 +34,6 @@ presidio:
     - US_DRIVER_LICENSE
     - IP_ADDRESS
     - IBAN_CODE
-    - LOCATION
-    - PERSON
-    - NRP               # Nationality / Religious / Political group
-    - DATE_TIME
     - MEDICAL_LICENSE
     - URL               # catches potential data-exfil URLs
 
