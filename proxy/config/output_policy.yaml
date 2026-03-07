@@ -1,0 +1,144 @@
+# ==============================================================================
+# VAJRA Layer 4 — Output Policy Configuration
+# ==============================================================================
+# Edit this file to tune PII redaction, secret detection, and content safety.
+# No Python changes required. Restart the service after editing.
+#
+# All sections are optional — missing keys fall back to built-in defaults.
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# STAGE 1: Presidio NER (name/location/org/date detection via spaCy NLP)
+# ------------------------------------------------------------------------------
+presidio:
+  # Set to false to skip NER entirely and rely only on regex (faster, less accurate)
+  enabled: true
+
+  # BCP-47 language code of the text being filtered
+  language: "en"
+
+  # Presidio confidence threshold (0.0–1.0). Lower = more detections but more
+  # false positives. 0.6 is a good production starting point.
+  score_threshold: 0.6
+
+  # Presidio entity types to detect and redact.
+  # Full list: https://microsoft.github.io/presidio/supported_entities/
+  # Remove an entry to stop redacting that type.
+  entities:
+    - EMAIL_ADDRESS
+    - PHONE_NUMBER
+    - CREDIT_CARD
+    - US_SSN
+    - US_PASSPORT
+    - US_DRIVER_LICENSE
+    - IP_ADDRESS
+    - IBAN_CODE
+    - LOCATION
+    - PERSON
+    - NRP               # Nationality / Religious / Political group
+    - DATE_TIME
+    - MEDICAL_LICENSE
+    - URL               # catches potential data-exfil URLs
+
+  # How to handle detected entities:
+  #   replace  → <ENTITY_TYPE>  (recommended, reversible in audit log)
+  #   mask     → ****
+  #   hash     → deterministic SHA-256 hex (useful for correlation)
+  #   redact   → remove the token entirely (no placeholder)
+  #   highlight → leave text unchanged but mark in findings only
+  operator: "replace"
+
+  # Entity types that Presidio detects but that should NOT flip the
+  # `redacted` flag in OutputResult (i.e. low-signal / noisy NER classes).
+  # These are still redacted in the text — they just don't count as
+  # "meaningful" redactions for downstream alerting purposes.
+  noisy_entities:
+    - DATE_TIME
+    - PERSON
+    - LOCATION
+    - NRP
+
+
+# ------------------------------------------------------------------------------
+# STAGE 2: Regex PII (structured tokens: SSN, credit card, IBAN, IP, email…)
+# ------------------------------------------------------------------------------
+regex_pii:
+  # Set to false to disable all regex PII scanning
+  enabled: true
+
+  # Fine-grained per-pattern toggles.
+  # Set a pattern name to false to disable only that check.
+  patterns:
+    ssn: true
+    credit_card: true
+    iban: true
+    ip_address: true
+    email: true
+    phone_us: true
+    phone_intl: true
+    date_of_birth: true
+
+
+# ------------------------------------------------------------------------------
+# STAGE 3: Secret / credential detection
+# (API keys, JWTs, private keys, connection strings, bearer tokens…)
+# ------------------------------------------------------------------------------
+secrets:
+  # Set to false to disable all secret scanning
+  enabled: true
+
+  # Fine-grained per-pattern toggles.
+  patterns:
+    aws_access_key: true
+    aws_secret_key: true
+    rsa_private_key: true
+    jwt_token: true
+    bearer_token: true
+    github_token: true
+    google_api_key: true
+    slack_token: true
+    generic_api_key: true
+    generic_secret: true
+    connection_string: true
+
+
+# ------------------------------------------------------------------------------
+# STAGE 4: Content safety rules
+# ------------------------------------------------------------------------------
+content_safety:
+  # Set to false to disable all content safety scanning
+  enabled: true
+
+  # warn_only: true  → log safety violations but DO NOT block the response
+  # warn_only: false → block and replace the response (production default)
+  warn_only: false
+
+  # The safe fallback text sent to the client when a response is blocked.
+  # Keep this neutral and non-specific so it reveals nothing about what fired.
+  block_response: >
+    I'm sorry — that response was blocked by the output safety filter.
+    Please rephrase your request or contact support.
+
+  # Minimum severity level that triggers a block (only relevant when warn_only=false).
+  # Options: LOW | MEDIUM | HIGH | CRITICAL
+  # Example: set to HIGH to allow MEDIUM findings through in warn_only fashion
+  #          while still hard-blocking HIGH and CRITICAL.
+  block_threshold: "LOW"
+
+  # Fine-grained per-rule toggles.
+  rules:
+    system_prompt_echo: true
+    jailbreak_confirmation: true
+    harmful_instructions: true
+    internal_data_leakage: true
+    dangerous_overconfidence: true
+
+
+# ------------------------------------------------------------------------------
+# STAGE 5: Audit envelope
+# ------------------------------------------------------------------------------
+audit:
+  # Attach the full findings metadata to the OutputResult object.
+  # Set to false only if you are handling audit logging upstream.
+  attach_metadata: true
