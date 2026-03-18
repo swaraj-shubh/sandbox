@@ -642,4 +642,4 @@ curl -N http://localhost:8000/logs/stream
 
 ---
 
-*Built with ❤️ for the AI security community*
+*Built with ❤️ by git-push-win*
